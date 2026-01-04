@@ -337,13 +337,29 @@ class DorkStrikeUI:
     def display_statistics(self, results):
         stats = f"""Статистика сканирования:
 
-Всего просканировано URL: {results['total_urls']}
-Всего найденных: {results['findings_count']}
-Длительность сканирования: {results['duration']:.2f} секунд
-Среднее время ответа: {results['avg_response_time']:.2f} секунд
+    Всего просканировано URL: {results['total_urls']}
+    Всего найденных: {results['findings_count']}
+    Длительность сканирования: {results['duration']:.2f} секунд
+    Среднее время ответа: {results['avg_response_time']:.2f} секунд
 
-Разбивка по паттернам:
-"""
+    Классификация ресурсов (Категории):
+    """
+
+        # Add resource classification statistics
+        resource_stats = results.get('resource_stats', {})
+        category_descriptions = {
+            'A': 'CONFIG/DATA FILES (КРИТИЧНО)',
+            'B': 'SOURCE/BUILD ARTIFACTS (ВЫСОКО)',
+            'C': 'BACKUPS/DUMPS (ВЫСОКО)',
+            'D': 'WEB PAGES (НИЗКО)',
+            'E': 'DOCS (ПРОПУЩЕНО)'
+        }
+
+        for cat in ['A', 'B', 'C', 'D', 'E']:
+            count = resource_stats.get(cat, 0)
+            stats += f"  {cat}: {category_descriptions[cat]} - {count}\n"
+
+        stats += "\nРазбивка по паттернам:\n"
 
         for pattern, count in results['pattern_breakdown'].items():
             stats += f"{pattern}: {count}\n"
@@ -506,7 +522,21 @@ class DorkStrikeUI:
     def update_detailed_stats(self, results):
         detailed = f"Подробная статистика:\n\n"
         detailed += f"Общее время: {results['duration']:.2f} сек\n"
-        detailed += f"Среднее время ответа: {results['avg_response_time']:.2f} сек\n"
+        detailed += f"Среднее время ответа: {results['avg_response_time']:.2f} сек\n\n"
+
+        # Add resource classification breakdown
+        detailed += "Распределение по категориям ресурсов:\n"
+        resource_stats = results.get('resource_stats', {})
+        total_resources = sum(resource_stats.values())
+
+        if total_resources > 0:
+            for cat in ['A', 'B', 'C', 'D', 'E']:
+                count = resource_stats.get(cat, 0)
+                percentage = (count / total_resources) * 100
+                detailed += f"  {cat}: {count} ({percentage:.1f}%)\n"
+        else:
+            detailed += "  Нет данных\n"
+
         self.root.after(0, lambda: self.detailed_stats_text.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.detailed_stats_text.delete(1.0, tk.END))
         self.root.after(0, lambda: self.detailed_stats_text.insert(tk.END, detailed))

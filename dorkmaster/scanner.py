@@ -177,7 +177,7 @@ class DorkScanner:
                 if self.stop_event.is_set():
                     break
 
-                task = asyncio.create_task(self.scan_url_async(session, url_data, pattern_category, semaphore))
+                task = asyncio.create_task(self.scan_url_async(session, url_data, pattern_category, semaphore, log_callback))
                 tasks.append(task)
 
                 # Process completed tasks in batches to update progress
@@ -377,7 +377,7 @@ class DorkScanner:
             print(f"JS rendering failed for {url}: {e}")
             return None
 
-    async def scan_url_async(self, session, url_data, pattern_category, semaphore):
+    async def scan_url_async(self, session, url_data, pattern_category, semaphore, log_callback=None):
         """Async version of scan_url with DNS check"""
         url, pattern_name, category = url_data
         start_time = time.time()
@@ -413,7 +413,7 @@ class DorkScanner:
                     # Run analysis in thread pool since it's CPU-bound
                     loop = asyncio.get_event_loop()
                     result_tuple = await loop.run_in_executor(None, self.analyze_response, html_content, url, pattern_name, category)
-                    
+
                     # analyze_response now returns (findings, skip_reason)
                     if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
                         findings, skip_reason = result_tuple
@@ -421,11 +421,11 @@ class DorkScanner:
                         # Backward compatibility - old return format (shouldn't happen but handle anyway)
                         findings = result_tuple if result_tuple is not None else []
                         skip_reason = None
-                    
-                    if skip_reason:
-                        progress_callback(0)  # Small update to trigger progress without affecting main counter
-                        # Skip reason will be logged in the calling context
-                    
+
+                    # Log skip reasons
+                    if skip_reason and log_callback:
+                        log_callback(skip_reason)
+
                     return findings, time.time() - start_time
                 else:
                     return [], time.time() - start_time
@@ -567,11 +567,15 @@ class DorkScanner:
 
             'duration': 0,
 
-            'avg_response_time': 0
+            'avg_response_time': 0,
 
+            'resource_stats': {category: 0 for category in RESOURCE_CATEGORIES.keys()}
         }
 
         start_time = time.time()
+
+        # Reset resource stats for local scan
+        self.resource_stats = {category: 0 for category in RESOURCE_CATEGORIES.keys()}
 
         for file_path in file_paths:
 
@@ -587,7 +591,16 @@ class DorkScanner:
 
                     content = f.read()
 
-                findings = self.analyze_response(content, file_path, "Local File", pattern_category)
+                findings_tuple = self.analyze_response(content, file_path, "Local File", pattern_category)
+
+                # analyze_response returns (findings, skip_reason)
+                if isinstance(findings_tuple, tuple) and len(findings_tuple) == 2:
+                    findings, skip_reason = findings_tuple
+                    # Log skip reasons
+                    if skip_reason and log_callback:
+                        log_callback(skip_reason)
+                else:
+                    findings = findings_tuple if findings_tuple is not None else []
 
                 for finding in findings:
 
@@ -608,6 +621,9 @@ class DorkScanner:
                 log_callback(f"Error scanning file {file_path}: {str(e)}")
 
         results['duration'] = time.time() - start_time
+
+        # Add resource statistics to results
+        results['resource_stats'] = self.resource_stats
 
         return results
 

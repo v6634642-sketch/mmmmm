@@ -194,6 +194,11 @@ class DorkStrikeUI:
             label.grid(row=0, column=i*2+1, sticky=tk.W, padx=(0, 20))
             self.stats_labels[stat] = label
 
+        # Resource classification stats
+        ttk.Label(stats_frame, text="Категории ресурсов:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        self.resource_stats_label = ttk.Label(stats_frame, text="A:0 B:0 C:0 D:0 E:0")
+        self.resource_stats_label.grid(row=1, column=1, columnspan=7, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+
         # Status bar
         self.status_var = tk.StringVar(value="Готов")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
@@ -299,8 +304,13 @@ class DorkStrikeUI:
     def update_statistics(self, results):
         self.stats_labels["Всего URL"].config(text=str(results.get('total_urls', 0)))
         self.stats_labels["Найдено"].config(text=str(results.get('findings_count', 0)))
-        self.stats_labels["Длительность"].config(text=".2f")
-        self.stats_labels["Среднее время ответа"].config(text=".2f")
+        self.stats_labels["Длительность"].config(text=f"{results.get('duration', 0):.2f}s")
+        self.stats_labels["Среднее время ответа"].config(text=f"{results.get('avg_response_time', 0):.2f}s")
+
+        # Update resource classification stats
+        resource_stats = results.get('resource_stats', {})
+        stats_text = " | ".join([f"{cat}:{count}" for cat, count in resource_stats.items()])
+        self.resource_stats_label.config(text=stats_text)
 
     def local_scan(self):
         file_paths = filedialog.askopenfilenames(
