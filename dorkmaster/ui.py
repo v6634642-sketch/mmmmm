@@ -182,22 +182,41 @@ class DorkStrikeUI:
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, height=15)
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
+        # Debug tab
+        debug_frame = ttk.Frame(self.results_notebook)
+        self.results_notebook.add(debug_frame, text="Debug URL")
+        debug_frame.columnconfigure(0, weight=1)
+
+        debug_input_frame = ttk.Frame(debug_frame, padding="10")
+        debug_input_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        debug_input_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(debug_input_frame, text="Тестовый URL:").grid(row=0, column=0, sticky=tk.W)
+        self.debug_url_var = tk.StringVar()
+        ttk.Entry(debug_input_frame, textvariable=self.debug_url_var).grid(row=0, column=1, sticky=(tk.W, tk.E), padx=10)
+        ttk.Button(debug_input_frame, text="Проверить", command=self.debug_single_url).grid(row=0, column=2)
+
+        self.debug_results_text = scrolledtext.ScrolledText(debug_frame, wrap=tk.WORD, height=15)
+        self.debug_results_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=10, pady=10)
+
         # Statistics
         stats_frame = ttk.LabelFrame(main_frame, text="Статистика", padding="10")
         stats_frame.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.stats_labels = {}
-        stats = ["Всего URL", "Найдено", "Длительность", "Среднее время ответа"]
+        stats = ["Всего URL", "DNS OK", "Загружено", "Regex совп.", "Найдено", "Длительность"]
         for i, stat in enumerate(stats):
-            ttk.Label(stats_frame, text=f"{stat}:").grid(row=0, column=i*2, sticky=tk.W, padx=(0, 5))
+            row = i // 3
+            col = i % 3
+            ttk.Label(stats_frame, text=f"{stat}:").grid(row=row, column=col*2, sticky=tk.W, padx=(0, 5))
             label = ttk.Label(stats_frame, text="0")
-            label.grid(row=0, column=i*2+1, sticky=tk.W, padx=(0, 20))
+            label.grid(row=row, column=col*2+1, sticky=tk.W, padx=(0, 20))
             self.stats_labels[stat] = label
 
         # Resource classification stats
-        ttk.Label(stats_frame, text="Категории ресурсов:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ttk.Label(stats_frame, text="Категории ресурсов:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         self.resource_stats_label = ttk.Label(stats_frame, text="A:0 B:0 C:0 D:0 E:0")
-        self.resource_stats_label.grid(row=1, column=1, columnspan=7, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        self.resource_stats_label.grid(row=2, column=1, columnspan=5, sticky=tk.W, padx=(0, 20), pady=(5, 0))
 
         # Status bar
         self.status_var = tk.StringVar(value="Готов")
@@ -282,6 +301,24 @@ class DorkStrikeUI:
 
     def progress_callback(self, progress):
         self.root.after(0, lambda: self.progress_var.set(progress))
+        
+        # Update live stats
+        self.root.after(0, self.update_live_stats)
+
+    def update_live_stats(self):
+        if not self.scanner:
+            return
+            
+        self.stats_labels["Всего URL"].config(text=str(self.scanner.total_urls))
+        self.stats_labels["DNS OK"].config(text=str(self.scanner.dns_passed_count))
+        self.stats_labels["Загружено"].config(text=str(self.scanner.download_success_count))
+        self.stats_labels["Regex совп."].config(text=str(self.scanner.regex_match_count))
+        self.stats_labels["Найдено"].config(text=str(self.scanner.findings_count))
+        
+        # Update resource classification stats
+        resource_stats = self.scanner.resource_stats
+        stats_text = " | ".join([f"{cat}:{count}" for cat, count in resource_stats.items()])
+        self.resource_stats_label.config(text=stats_text)
 
     def log_callback(self, message):
         self.root.after(0, lambda: self.log_text.insert(tk.END, message + "\n"))
@@ -303,9 +340,11 @@ class DorkStrikeUI:
 
     def update_statistics(self, results):
         self.stats_labels["Всего URL"].config(text=str(results.get('total_urls', 0)))
+        self.stats_labels["DNS OK"].config(text=str(results.get('dns_passed', 0)))
+        self.stats_labels["Загружено"].config(text=str(results.get('download_success', 0)))
+        self.stats_labels["Regex совп."].config(text=str(results.get('regex_matches', 0)))
         self.stats_labels["Найдено"].config(text=str(results.get('findings_count', 0)))
         self.stats_labels["Длительность"].config(text=f"{results.get('duration', 0):.2f}s")
-        self.stats_labels["Среднее время ответа"].config(text=f"{results.get('avg_response_time', 0):.2f}s")
 
         # Update resource classification stats
         resource_stats = results.get('resource_stats', {})
@@ -345,6 +384,66 @@ class DorkStrikeUI:
 
         except Exception as e:
             messagebox.showerror("Ошибка", f"Локальное сканирование не удалось: {str(e)}")
+
+    def debug_single_url(self):
+        url = self.debug_url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Предупреждение", "Введите URL для тестирования")
+            return
+
+        self.debug_results_text.delete(1.0, tk.END)
+        self.debug_results_text.insert(tk.END, f"Testing URL: {url}\n")
+        
+        # Initialize scanner if not already done
+        if not self.scanner:
+            self.scanner = DorkScanner()
+
+        def run_debug():
+            try:
+                import requests
+                headers = {'User-Agent': self.scanner.get_fresh_user_agent()}
+                
+                self.root.after(0, lambda: self.debug_results_text.insert(tk.END, "Step 1: Downloading content...\n"))
+                response = requests.get(url, headers=headers, timeout=10)
+                
+                if response.status_code != 200:
+                    self.root.after(0, lambda: self.debug_results_text.insert(tk.END, f"Download failed: status {response.status_code}\n"))
+                    return
+
+                html_content = response.text
+                self.root.after(0, lambda: self.debug_results_text.insert(tk.END, f"Step 2: Downloaded {len(html_content)} bytes\n"))
+
+                # Classify
+                resource = self.scanner.classify_resource(url)
+                self.root.after(0, lambda: self.debug_results_text.insert(tk.END, f"Step 3: Classification: {resource['category']} ({resource['priority']})\n"))
+
+                # Run patterns
+                self.root.after(0, lambda: self.debug_results_text.insert(tk.END, "Step 4: Applying regex patterns...\n"))
+                
+                category = self.category_var.get()
+                if category == "ALL":
+                    categories = ["CRYPTO", "SECRETS", "VULNERABILITIES"]
+                else:
+                    categories = [category]
+
+                all_findings = []
+                for cat in categories:
+                    patterns = self.scanner.patterns.get_patterns(cat)
+                    for pattern_name in patterns:
+                        findings, skip_reason = self.scanner.analyze_response(html_content, url, pattern_name, cat)
+                        if skip_reason:
+                            self.root.after(0, lambda s=skip_reason: self.debug_results_text.insert(tk.END, f"  - {pattern_name}: {s}\n"))
+                        if findings:
+                            all_findings.extend(findings)
+                            for f in findings:
+                                self.root.after(0, lambda f=f: self.debug_results_text.insert(tk.END, f"  [+] MATCH: {f['pattern']} | {f['match']} | {f['verification']}\n"))
+
+                self.root.after(0, lambda: self.debug_results_text.insert(tk.END, f"\nStep 5: Done. Total findings: {len(all_findings)}\n"))
+
+            except Exception as e:
+                self.root.after(0, lambda e=e: self.debug_results_text.insert(tk.END, f"Error: {str(e)}\n"))
+
+        threading.Thread(target=run_debug, daemon=True).start()
 
     def load_proxies(self):
         file_path = filedialog.askopenfilename(
