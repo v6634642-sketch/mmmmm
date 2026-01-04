@@ -15,6 +15,44 @@ from bs4 import BeautifulSoup
 from patterns import DorkPatterns, validate_crypto_pattern, validate_secret_pattern, calculate_shannon_entropy, verify_api_key
 from fake_useragent import UserAgent
 
+# Resource classification categories
+RESOURCE_CATEGORIES = {
+    'A': 'CONFIG/DATA FILES',
+    'B': 'SOURCE/BUILD ARTIFACTS', 
+    'C': 'BACKUPS/DUMPS',
+    'D': 'WEB PAGES',
+    'E': 'DOCS'
+}
+
+# Priority mapping for UI display
+CATEGORY_PRIORITY = {
+    'A': 'CRITICAL',
+    'B': 'HIGH',
+    'C': 'HIGH',
+    'D': 'LOW',
+    'E': 'SKIP'
+}
+
+# Extensions by category
+CATEGORY_EXTENSIONS = {
+    'A': ['.env', '.json', '.yml', '.yaml', '.ini', '.conf', '.cnf', '.sql', '.dump', '.bak', '.old', '.zip', '.tar.gz'],
+    'B': ['.js.map', '.py', '.php', '.rb', '.go'],
+    'C': ['.backup', '.dump', '.sql', '.archive', '.tar', '.tar.gz', '.zip', '.db'],
+    'D': ['.html', '.htm'],
+}
+
+# URL path blacklist (Category E)
+BLACKLIST_URLS = [
+    "/docs",
+    "/readme", 
+    "/swagger",
+    "/postman",
+    "/wiki",
+    "/faq",
+    "/help",
+    "/examples",
+]
+
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
@@ -36,6 +74,69 @@ class DorkScanner:
         self.depth = depth
         self.request_count = 0
         self.custom_dorks = custom_dorks or []
+        
+        # Resource classification tracking
+        self.resource_stats = {category: 0 for category in RESOURCE_CATEGORIES.keys()}
+
+    def classify_resource(self, url, content_type=""):
+        """
+        Classify a URL into resource categories A-E.
+        
+        Returns: dict with 'category' and 'priority' keys
+        """
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        
+        # Check URL blacklist first (Category E - always skip)
+        for blacklist_item in BLACKLIST_URLS:
+            if blacklist_item.lower() in path:
+                return {'category': 'E', 'priority': CATEGORY_PRIORITY['E']}
+        
+        # Check extensions by priority
+        url_lower = url.lower()
+        
+        # Category A: CONFIG/DATA FILES
+        for ext in CATEGORY_EXTENSIONS['A']:
+            if url_lower.endswith(ext):
+                return {'category': 'A', 'priority': CATEGORY_PRIORITY['A']}
+        
+        # Category B: SOURCE/BUILD ARTIFACTS  
+        for ext in CATEGORY_EXTENSIONS['B']:
+            if url_lower.endswith(ext):
+                return {'category': 'B', 'priority': CATEGORY_PRIORITY['B']}
+        
+        # Category C: BACKUPS/DUMPS
+        for ext in CATEGORY_EXTENSIONS['C']:
+            if url_lower.endswith(ext):
+                return {'category': 'C', 'priority': CATEGORY_PRIORITY['C']}
+        
+        # Category D: WEB PAGES
+        for ext in CATEGORY_EXTENSIONS['D']:
+            if url_lower.endswith(ext):
+                return {'category': 'D', 'priority': CATEGORY_PRIORITY['D']}
+        
+        # Check for backup/dump paths even without specific extensions
+        if any(keyword in path for keyword in ['backup', 'dump', 'db', 'export', 'archive']):
+            return {'category': 'C', 'priority': CATEGORY_PRIORITY['C']}
+        
+        # Check content type as fallback
+        if content_type:
+            content_type = content_type.lower()
+            if 'text/html' in content_type:
+                return {'category': 'D', 'priority': CATEGORY_PRIORITY['D']}
+        
+        # Default to WEB PAGES (D) if no clear classification
+        return {'category': 'D', 'priority': CATEGORY_PRIORITY['D']}
+
+    def is_url_blacklisted(self, url):
+        """Check if URL is in blacklist (Category E)"""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        
+        for blacklist_item in BLACKLIST_URLS:
+            if blacklist_item.lower() in path:
+                return True
+        return False
 
     def stop_scan(self):
         self.stop_event.set()
@@ -135,6 +236,12 @@ class DorkScanner:
         if response_times:
             results['avg_response_time'] = sum(response_times) / len(response_times)
 
+        # Add resource statistics to results
+        results['resource_stats'] = self.resource_stats
+        
+        # Log resource classification summary
+        resource_summary = " | ".join([f"{cat}:{RESOURCE_CATEGORIES[cat][:8]}:{count}" for cat, count in self.resource_stats.items()])
+        log_callback(f"Resource classification: {resource_summary}")
         log_callback(f"Scan completed. Found {results['findings_count']} potential vulnerabilities.")
         return results
 
@@ -305,7 +412,20 @@ class DorkScanner:
                 if html_content:
                     # Run analysis in thread pool since it's CPU-bound
                     loop = asyncio.get_event_loop()
-                    findings = await loop.run_in_executor(None, self.analyze_response, html_content, url, pattern_name, category)
+                    result_tuple = await loop.run_in_executor(None, self.analyze_response, html_content, url, pattern_name, category)
+                    
+                    # analyze_response now returns (findings, skip_reason)
+                    if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                        findings, skip_reason = result_tuple
+                    else:
+                        # Backward compatibility - old return format (shouldn't happen but handle anyway)
+                        findings = result_tuple if result_tuple is not None else []
+                        skip_reason = None
+                    
+                    if skip_reason:
+                        progress_callback(0)  # Small update to trigger progress without affecting main counter
+                        # Skip reason will be logged in the calling context
+                    
                     return findings, time.time() - start_time
                 else:
                     return [], time.time() - start_time
@@ -350,14 +470,38 @@ class DorkScanner:
             return [], time.time() - start_time
 
     def analyze_response(self, html_content, url, pattern_name, category):
-        """Analyze the HTML content for patterns with validation"""
+        """Analyze the HTML content for patterns with validation and resource classification."""
         findings = []
-
+        skip_reason = None
+        
+        # Classify the resource
+        resource = self.classify_resource(url)
+        resource_category = resource['category']
+        
+        # Update resource statistics
+        self.resource_stats[resource_category] += 1
+        
+        # Skip if URL is blacklisted (Category E)
+        if resource_category == 'E':
+            skip_reason = f"Skipped (docs) - {url}"
+            return findings, skip_reason
+        
         patterns = self.patterns.get_patterns(category)
         if pattern_name in patterns:
             pattern_data = patterns[pattern_name]
             regex_patterns = pattern_data.get('regex', [])
-
+            allow_categories = pattern_data.get('allow_categories', ['A', 'B', 'C'])  # Default to A/B/C
+            deny_categories = pattern_data.get('deny_categories', ['D', 'E'])
+            
+            # Check if pattern is allowed for this resource category
+            if resource_category not in allow_categories:
+                skip_reason = f"Skipped (resource mismatch {resource_category} ≠ {allow_categories}) - {url}"
+                return findings, skip_reason
+                
+            if resource_category in deny_categories:
+                skip_reason = f"Skipped (deny category {resource_category}) - {url}"
+                return findings, skip_reason
+                
             for regex in regex_patterns:
                 try:
                     matches = re.findall(regex, html_content, re.IGNORECASE | re.MULTILINE)
@@ -402,12 +546,14 @@ class DorkScanner:
                                 'pattern': pattern_name,
                                 'url': url,
                                 'match': match_str,
-                                'verification': verification_status
+                                'verification': verification_status,
+                                'resource_category': resource_category,
+                                'resource_priority': resource['priority']
                             })
                 except re.error:
                     continue  # Skip invalid regex patterns
 
-        return findings
+        return findings, skip_reason
 
     def local_scan(self, file_paths, pattern_category, log_callback, finding_callback):
 
