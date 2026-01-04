@@ -77,6 +77,12 @@ class DorkScanner:
         
         # Resource classification tracking
         self.resource_stats = {category: 0 for category in RESOURCE_CATEGORIES.keys()}
+        self.dns_passed_count = 0
+        self.download_success_count = 0
+        self.regex_match_count = 0
+        self.findings_count = 0
+        self.total_urls = 0
+        self.target_domain = ""
 
     def classify_resource(self, url, content_type=""):
         """
@@ -144,19 +150,24 @@ class DorkScanner:
     async def scan_async(self, target_domain, pattern_category, max_concurrent, progress_callback, log_callback, finding_callback):
         """Async version of scan method"""
         start_time = time.time()
+        self.target_domain = target_domain
 
         # Generate dork URLs
         dork_urls = self.generate_dork_urls(target_domain, pattern_category)
-        total_urls = len(dork_urls)
+        self.total_urls = len(dork_urls)
+        total_urls = self.total_urls
 
-        log_callback(f"Generated {total_urls} dork URLs for scanning")
+        log_callback(f"Stage 1: Generated {total_urls} URLs")
 
         results = {
             'total_urls': total_urls,
             'findings_count': 0,
             'pattern_breakdown': {},
             'duration': 0,
-            'avg_response_time': 0
+            'avg_response_time': 0,
+            'dns_passed': 0,
+            'download_success': 0,
+            'regex_matches': 0
         }
 
         findings = []
@@ -194,6 +205,7 @@ class DorkScanner:
                             for finding in url_findings:
                                 finding_callback(finding['type'], finding['pattern'], finding['url'], finding['match'], finding.get('verification', 'Format valid'))
                                 results['findings_count'] += 1
+                                self.findings_count += 1
 
                                 pattern_type = finding['type']
                                 if pattern_type not in results['pattern_breakdown']:
@@ -219,6 +231,7 @@ class DorkScanner:
                         for finding in url_findings:
                             finding_callback(finding['type'], finding['pattern'], finding['url'], finding['match'], finding.get('verification', 'Format valid'))
                             results['findings_count'] += 1
+                            self.findings_count += 1
 
                             pattern_type = finding['type']
                             if pattern_type not in results['pattern_breakdown']:
@@ -236,12 +249,23 @@ class DorkScanner:
         if response_times:
             results['avg_response_time'] = sum(response_times) / len(response_times)
 
-        # Add resource statistics to results
+        # Update results with pipeline stats
+        results['dns_passed'] = self.dns_passed_count
+        results['download_success'] = self.download_success_count
+        results['regex_matches'] = self.regex_match_count
         results['resource_stats'] = self.resource_stats
         
-        # Log resource classification summary
+        # Log summary stages
+        log_callback(f"Stage 2: Domain validation passed: {self.dns_passed_count}")
+        log_callback(f"Stage 3: Downloads successful: {self.download_success_count}")
+        
+        # Log resource classification summary (Stage 4)
         resource_summary = " | ".join([f"{cat}:{RESOURCE_CATEGORIES[cat][:8]}:{count}" for cat, count in self.resource_stats.items()])
-        log_callback(f"Resource classification: {resource_summary}")
+        log_callback(f"Stage 4: Classification categories: {resource_summary}")
+        
+        log_callback(f"Stage 5: Regex matched: {self.regex_match_count}")
+        log_callback(f"Stage 6: Final findings: {results['findings_count']}")
+        
         log_callback(f"Scan completed. Found {results['findings_count']} potential vulnerabilities.")
         return results
 
@@ -390,7 +414,11 @@ class DorkScanner:
 
                 # Check DNS resolution first
                 if not await self.check_dns_resolution(domain):
+                    if log_callback:
+                        log_callback(f"URL rejected: DNS resolution failed ({domain})")
                     return [], time.time() - start_time
+                
+                self.dns_passed_count += 1
 
                 # Use JS rendering if enabled
                 html_content = None
@@ -398,16 +426,30 @@ class DorkScanner:
                     # Run JS rendering in thread pool since Playwright is sync
                     loop = asyncio.get_event_loop()
                     html_content = await loop.run_in_executor(None, self.render_page_with_js, url)
+                    if html_content:
+                        self.download_success_count += 1
+                    else:
+                        if log_callback:
+                            log_callback(f"Download failed: JS rendering returned no content for {url}")
+                        return [], time.time() - start_time
                 else:
                     # Use aiohttp for regular requests
                     headers = {'User-Agent': self.get_fresh_user_agent()}
                     timeout = aiohttp.ClientTimeout(total=10)
 
-                    async with session.get(url, headers=headers, timeout=timeout) as response:
-                        if response.status == 200:
-                            html_content = await response.text()
-                        else:
-                            return [], time.time() - start_time
+                    try:
+                        async with session.get(url, headers=headers, timeout=timeout) as response:
+                            if response.status == 200:
+                                html_content = await response.text()
+                                self.download_success_count += 1
+                            else:
+                                if log_callback:
+                                    log_callback(f"Download failed: status {response.status} for {url}")
+                                return [], time.time() - start_time
+                    except Exception as e:
+                        if log_callback:
+                            log_callback(f"Download failed: {str(e)} for {url}")
+                        return [], time.time() - start_time
 
                 if html_content:
                     # Run analysis in thread pool since it's CPU-bound
@@ -474,6 +516,13 @@ class DorkScanner:
         findings = []
         skip_reason = None
         
+        # Check domain if target_domain is set
+        if self.target_domain and "://" in url:
+            parsed_url = urlparse(url)
+            if self.target_domain not in parsed_url.netloc:
+                skip_reason = f"URL rejected: external domain ({parsed_url.netloc})"
+                return findings, skip_reason
+
         # Classify the resource
         resource = self.classify_resource(url)
         resource_category = resource['category']
@@ -483,7 +532,7 @@ class DorkScanner:
         
         # Skip if URL is blacklisted (Category E)
         if resource_category == 'E':
-            skip_reason = f"Skipped (docs) - {url}"
+            skip_reason = f"URL rejected: blacklist ({url})"
             return findings, skip_reason
         
         patterns = self.patterns.get_patterns(category)
@@ -495,17 +544,21 @@ class DorkScanner:
             
             # Check if pattern is allowed for this resource category
             if resource_category not in allow_categories:
-                skip_reason = f"Skipped (resource mismatch {resource_category} ≠ {allow_categories}) - {url}"
+                skip_reason = f"URL rejected: not in allowed categories (resource mismatch {resource_category} not in {allow_categories}) - {url}"
                 return findings, skip_reason
                 
             if resource_category in deny_categories:
-                skip_reason = f"Skipped (deny category {resource_category}) - {url}"
+                skip_reason = f"URL rejected: deny category {resource_category} - {url}"
                 return findings, skip_reason
                 
+            matches_found_for_url = False
             for regex in regex_patterns:
                 try:
                     matches = re.findall(regex, html_content, re.IGNORECASE | re.MULTILINE)
+                    if matches:
+                        matches_found_for_url = True
                     for match in matches:
+                        self.regex_match_count += 1
                         match_str = str(match)[:100]  # Limit match length
 
                         # Apply validation based on category
@@ -552,14 +605,17 @@ class DorkScanner:
                             })
                 except re.error:
                     continue  # Skip invalid regex patterns
+            
+            if not matches_found_for_url:
+                skip_reason = f"Regex no match for {url}"
 
         return findings, skip_reason
 
     def local_scan(self, file_paths, pattern_category, log_callback, finding_callback):
-
+        self.total_urls = len(file_paths)
         results = {
 
-            'total_urls': len(file_paths),
+            'total_urls': self.total_urls,
 
             'findings_count': 0,
 
@@ -574,8 +630,10 @@ class DorkScanner:
 
         start_time = time.time()
 
-        # Reset resource stats for local scan
+        # Reset stats for local scan
         self.resource_stats = {category: 0 for category in RESOURCE_CATEGORIES.keys()}
+        self.findings_count = 0
+        self.regex_match_count = 0
 
         for file_path in file_paths:
 
@@ -591,30 +649,34 @@ class DorkScanner:
 
                     content = f.read()
 
-                findings_tuple = self.analyze_response(content, file_path, "Local File", pattern_category)
+                # Get all patterns for the category
+                patterns = self.patterns.get_patterns(pattern_category)
+                for pattern_name in patterns:
+                    findings_tuple = self.analyze_response(content, file_path, pattern_name, pattern_category)
 
-                # analyze_response returns (findings, skip_reason)
-                if isinstance(findings_tuple, tuple) and len(findings_tuple) == 2:
-                    findings, skip_reason = findings_tuple
-                    # Log skip reasons
-                    if skip_reason and log_callback:
-                        log_callback(skip_reason)
-                else:
-                    findings = findings_tuple if findings_tuple is not None else []
+                    # analyze_response returns (findings, skip_reason)
+                    if isinstance(findings_tuple, tuple) and len(findings_tuple) == 2:
+                        findings, skip_reason = findings_tuple
+                        # Log skip reasons only if they are not "Regex no match" to avoid cluttering
+                        if skip_reason and "Regex no match" not in skip_reason and log_callback:
+                            log_callback(skip_reason)
+                    else:
+                        findings = findings_tuple if findings_tuple is not None else []
 
-                for finding in findings:
+                    for finding in findings:
 
-                    finding_callback(finding['type'], finding['pattern'], finding['url'], finding['match'], finding.get('verification', 'Format valid'))
+                        finding_callback(finding['type'], finding['pattern'], finding['url'], finding['match'], finding.get('verification', 'Format valid'))
 
-                    results['findings_count'] += 1
+                        results['findings_count'] += 1
+                        self.findings_count += 1
 
-                    pattern_type = finding['type']
+                        pattern_type = finding['type']
 
-                    if pattern_type not in results['pattern_breakdown']:
+                        if pattern_type not in results['pattern_breakdown']:
 
-                        results['pattern_breakdown'][pattern_type] = 0
+                            results['pattern_breakdown'][pattern_type] = 0
 
-                    results['pattern_breakdown'][pattern_type] += 1
+                        results['pattern_breakdown'][pattern_type] += 1
 
             except Exception as e:
 
