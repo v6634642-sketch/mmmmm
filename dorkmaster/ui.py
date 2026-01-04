@@ -24,17 +24,14 @@ class DorkStrikeUI:
 
         # Create GUI elements
         self.create_widgets()
-# Initialize patterns for category info
 
-self.patterns = DorkPatterns()
+        # Initialize patterns for category info
+        self.patterns = DorkPatterns()
 
-# Findings storage for filtering
-
-self.all_findings = []
-
-self.pattern_search_var = tk.StringVar()
-
-self.verification_search_var = tk.StringVar()
+        # Findings storage for filtering
+        self.all_findings = []
+        self.pattern_search_var = tk.StringVar()
+        self.verification_search_var = tk.StringVar()
 
     def create_widgets(self):
         # Create main frame
@@ -285,11 +282,19 @@ self.verification_search_var = tk.StringVar()
         self.root.after(0, lambda: self.log_text.insert(tk.END, message + "\n"))
         self.root.after(0, lambda: self.log_text.see(tk.END))
         self.root.after(0, lambda: self.status_var.set(message))
-def finding_callback(self, finding_type, pattern, url, match, verification):
 
-    self.all_findings.append((finding_type, pattern, url, match, verification))
+    def finding_callback(self, finding_type, pattern, url, match, verification):
+        self.all_findings.append((finding_type, pattern, url, match, verification))
+        self.populate_findings()
 
-    self.populate_findings()
+    def populate_findings(self):
+        # Clear existing items
+        for item in self.findings_tree.get_children():
+            self.findings_tree.delete(item)
+
+        # Populate with all findings
+        for finding_type, pattern, url, match, verification in self.all_findings:
+            self.findings_tree.insert("", tk.END, values=(finding_type, pattern, url, match, verification))
 
     def update_statistics(self, results):
         self.stats_labels["Всего URL"].config(text=str(results.get('total_urls', 0)))
