@@ -60,7 +60,7 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 class DorkScanner:
-    def __init__(self, proxies=None, search_engines=None, use_js_rendering=False, verify_api_keys=False, strictness="medium", depth=3, custom_dorks=None):
+    def __init__(self, proxies=None, search_engines=None, use_js_rendering=False, verify_api_keys=False, strictness="medium", depth=3, custom_dorks=None, raw_mode=False):
         self.patterns = DorkPatterns()
         self.stop_event = threading.Event()
         self.session = requests.Session()
@@ -74,6 +74,7 @@ class DorkScanner:
         self.depth = depth
         self.request_count = 0
         self.custom_dorks = custom_dorks or []
+        self.raw_mode = raw_mode
         
         # Resource classification tracking
         self.resource_stats = {category: 0 for category in RESOURCE_CATEGORIES.keys()}
@@ -148,16 +149,25 @@ class DorkScanner:
         self.stop_event.set()
 
     async def scan_async(self, target_domain, pattern_category, max_concurrent, progress_callback, log_callback, finding_callback):
-        """Async version of scan method"""
+        """Async version of scan method overhauled for Wayback Pipeline"""
         start_time = time.time()
         self.target_domain = target_domain
 
-        # Generate dork URLs
-        dork_urls = self.generate_dork_urls(target_domain, pattern_category)
-        self.total_urls = len(dork_urls)
+        log_callback(f"Stage 1: Searching Wayback Machine for {target_domain}...")
+        
+        # SEARCH STAGE
+        found_urls = await self.search_wayback_archives(target_domain, log_callback)
+        
+        # Also include any custom dorks if they look like direct URLs
+        for dork in self.custom_dorks:
+            if dork.startswith("http"):
+                 found_urls.append(dork.replace("{target}", target_domain))
+        
+        found_urls = list(set(found_urls))
+        self.total_urls = len(found_urls)
         total_urls = self.total_urls
 
-        log_callback(f"Stage 1: Generated {total_urls} URLs")
+        log_callback(f"Stage 1: Found {total_urls} URLs in archives")
 
         results = {
             'total_urls': total_urls,
@@ -178,17 +188,18 @@ class DorkScanner:
 
         # Create aiohttp session with connector settings
         connector = aiohttp.TCPConnector(limit=max_concurrent, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=10, connect=5)
+        timeout = aiohttp.ClientTimeout(total=20, connect=10)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             tasks = []
             completed = 0
 
-            for url_data in dork_urls:
+            for url in found_urls:
                 if self.stop_event.is_set():
                     break
 
-                task = asyncio.create_task(self.scan_url_async(session, url_data, pattern_category, semaphore, log_callback))
+                # We pass "ALL" as pattern_name to scan for all patterns in the category
+                task = asyncio.create_task(self.scan_url_async(session, (url, "ALL", pattern_category), pattern_category, semaphore, log_callback))
                 tasks.append(task)
 
                 # Process completed tasks in batches to update progress
@@ -216,7 +227,7 @@ class DorkScanner:
                             log_callback(f"Error processing task: {str(e)}")
 
                         completed += 1
-                        progress = (completed / total_urls) * 100
+                        progress = (completed / total_urls) * 100 if total_urls > 0 else 100
                         progress_callback(progress)
 
             # Process remaining tasks
@@ -242,7 +253,7 @@ class DorkScanner:
                         log_callback(f"Error processing final task: {str(e)}")
 
                     completed += 1
-                    progress = (completed / total_urls) * 100
+                    progress = (completed / total_urls) * 100 if total_urls > 0 else 100
                     progress_callback(progress)
 
         results['duration'] = time.time() - start_time
@@ -345,6 +356,37 @@ class DorkScanner:
             # Wayback Machine CDX API
             return f"https://web.archive.org/cdx/search/cdx?url={query_encoded}&output=json"
         return None
+
+    async def search_wayback_archives(self, target, log_callback=None):
+        """
+        Поиск архивных URL через CDX API (Wayback Machine).
+        Ищем файлы по расширению для конкретного домена.
+        """
+        found_urls = []
+        extensions = ["env", "json", "txt", "sql", "bak", "yml", "yaml", "conf"]
+        
+        async with aiohttp.ClientSession() as session:
+            for ext in extensions:
+                if self.stop_event.is_set(): 
+                    break
+                
+                # CDX API запрос: ищем файлы с расширением на целевом домене
+                url = f"http://web.archive.org/cdx/search/cdx?url={target}/*&filter=original:.*\\.{ext}&output=json&collapse=urlkey&filter=statuscode:200"
+                
+                try:
+                    async with session.get(url, timeout=10) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            # Пропускаем заголовок [["urlkey", "timestamp", ...]]
+                            if len(data) > 1:
+                                for item in data[1:]:
+                                    found_urls.append(item[2])  # Индекс 2 - оригинальный URL
+                                    
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"Wayback error ({ext}): {e}")
+        
+        return list(set(found_urls))
 
     async def check_dns_resolution(self, domain):
         """Check if domain resolves to IP addresses"""
@@ -503,7 +545,11 @@ class DorkScanner:
                     return [], response_time
 
             if html_content:
-                findings = self.analyze_response(html_content, url, pattern_name, category)
+                result_tuple = self.analyze_response(html_content, url, pattern_name, category)
+                if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                    findings, skip_reason = result_tuple
+                else:
+                    findings = result_tuple
                 return findings, response_time
             else:
                 return [], response_time
@@ -535,79 +581,84 @@ class DorkScanner:
             skip_reason = f"URL rejected: blacklist ({url})"
             return findings, skip_reason
         
-        patterns = self.patterns.get_patterns(category)
-        if pattern_name in patterns:
-            pattern_data = patterns[pattern_name]
-            regex_patterns = pattern_data.get('regex', [])
-            allow_categories = pattern_data.get('allow_categories', ['A', 'B', 'C'])  # Default to A/B/C
-            deny_categories = pattern_data.get('deny_categories', ['D', 'E'])
+        if category == "ALL":
+            categories_to_check = ["CRYPTO", "SECRETS", "VULNERABILITIES"]
+        else:
+            categories_to_check = [category]
+
+        for cat in categories_to_check:
+            patterns = self.patterns.get_patterns(cat)
             
-            # Check if pattern is allowed for this resource category
-            if resource_category not in allow_categories:
-                skip_reason = f"URL rejected: not in allowed categories (resource mismatch {resource_category} not in {allow_categories}) - {url}"
-                return findings, skip_reason
-                
-            if resource_category in deny_categories:
-                skip_reason = f"URL rejected: deny category {resource_category} - {url}"
-                return findings, skip_reason
-                
-            matches_found_for_url = False
-            for regex in regex_patterns:
-                try:
-                    matches = re.findall(regex, html_content, re.IGNORECASE | re.MULTILINE)
-                    if matches:
-                        matches_found_for_url = True
-                    for match in matches:
-                        self.regex_match_count += 1
-                        match_str = str(match)[:100]  # Limit match length
-
-                        # Apply validation based on category
-                        is_valid = True
-                        verification_status = "Format valid"
-
-                        if category == "CRYPTO":
-                            is_valid = validate_crypto_pattern(pattern_name, match_str)
-                            if not is_valid:
-                                verification_status = "Invalid checksum"
-                        elif category == "SECRETS":
-                            is_valid = validate_secret_pattern(pattern_name, match_str)
-                            if not is_valid:
-                                verification_status = "Low entropy or invalid format"
-
-                            # Additional API verification for supported services
-                            if is_valid and self.verify_api_keys and category == "SECRETS":
-                                # Run async verification in current thread
-                                try:
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    verified, status = loop.run_until_complete(
-                                        verify_api_key(pattern_name, match_str)
-                                    )
-                                    loop.close()
-
-                                    if verified:
-                                        verification_status = f"Live verified: {status}"
-                                    else:
-                                        verification_status = f"Live check failed: {status}"
-                                        is_valid = False  # Mark as invalid if live check fails
-                                except Exception as e:
-                                    verification_status = f"Verification error: {str(e)}"
-
-                        if is_valid:
-                            findings.append({
-                                'type': category,
-                                'pattern': pattern_name,
-                                'url': url,
-                                'match': match_str,
-                                'verification': verification_status,
-                                'resource_category': resource_category,
-                                'resource_priority': resource['priority']
-                            })
-                except re.error:
-                    continue  # Skip invalid regex patterns
+            patterns_to_check = {}
+            if pattern_name == "ALL" or pattern_name == "Custom Dork" or pattern_name == "CUSTOM":
+                patterns_to_check = patterns
+            elif pattern_name in patterns:
+                patterns_to_check = {pattern_name: patterns[pattern_name]}
             
-            if not matches_found_for_url:
-                skip_reason = f"Regex no match for {url}"
+            for p_name, pattern_data in patterns_to_check.items():
+                regex_patterns = pattern_data.get('regex', [])
+                allow_categories = pattern_data.get('allow_categories', ['A', 'B', 'C'])  # Default to A/B/C
+                deny_categories = pattern_data.get('deny_categories', ['D', 'E'])
+                
+                # Check if pattern is allowed for this resource category
+                # In RAW MODE we bypass category filtering
+                if not self.raw_mode:
+                    if resource_category not in allow_categories:
+                        continue
+                        
+                    if resource_category in deny_categories:
+                        continue
+                    
+                for regex in regex_patterns:
+                    try:
+                        matches = re.findall(regex, html_content, re.IGNORECASE | re.MULTILINE)
+                        for match in matches:
+                            self.regex_match_count += 1
+                            match_str = str(match)[:100]  # Limit match length
+
+                            # Apply validation based on category
+                            is_valid = True
+                            verification_status = "Format valid"
+
+                            if cat == "CRYPTO":
+                                is_valid, verification_status = validate_crypto_pattern(p_name, match_str, self.raw_mode)
+                            elif cat == "SECRETS":
+                                is_valid, verification_status = validate_secret_pattern(p_name, match_str, self.raw_mode)
+                                
+                                # Additional API verification for supported services
+                                if is_valid and self.verify_api_keys and cat == "SECRETS" and not self.raw_mode:
+                                    # Run async verification in current thread
+                                    try:
+                                        loop = asyncio.new_event_loop()
+                                        asyncio.set_event_loop(loop)
+                                        verified, status = loop.run_until_complete(
+                                            verify_api_key(p_name, match_str)
+                                        )
+                                        loop.close()
+
+                                        if verified:
+                                            verification_status = f"Live verified: {status}"
+                                        else:
+                                            verification_status = f"Live check failed: {status}"
+                                            is_valid = False  # Mark as invalid if live check fails
+                                    except Exception as e:
+                                        verification_status = f"Verification error: {str(e)}"
+
+                            if is_valid or self.raw_mode:
+                                findings.append({
+                                    'type': cat,
+                                    'pattern': p_name,
+                                    'url': url,
+                                    'match': match_str,
+                                    'verification': verification_status,
+                                    'resource_category': resource_category,
+                                    'resource_priority': resource['priority']
+                                })
+                    except re.error:
+                        continue  # Skip invalid regex patterns
+        
+        if not findings:
+            skip_reason = f"No findings for {url}"
 
         return findings, skip_reason
 
@@ -649,34 +700,32 @@ class DorkScanner:
 
                     content = f.read()
 
-                # Get all patterns for the category
-                patterns = self.patterns.get_patterns(pattern_category)
-                for pattern_name in patterns:
-                    findings_tuple = self.analyze_response(content, file_path, pattern_name, pattern_category)
+                # Get all findings for the category
+                findings_tuple = self.analyze_response(content, file_path, "ALL", pattern_category)
 
-                    # analyze_response returns (findings, skip_reason)
-                    if isinstance(findings_tuple, tuple) and len(findings_tuple) == 2:
-                        findings, skip_reason = findings_tuple
-                        # Log skip reasons only if they are not "Regex no match" to avoid cluttering
-                        if skip_reason and "Regex no match" not in skip_reason and log_callback:
-                            log_callback(skip_reason)
-                    else:
-                        findings = findings_tuple if findings_tuple is not None else []
+                # analyze_response returns (findings, skip_reason)
+                if isinstance(findings_tuple, tuple) and len(findings_tuple) == 2:
+                    findings, skip_reason = findings_tuple
+                    # Log skip reasons only if they are not "No findings" to avoid cluttering
+                    if skip_reason and "No findings" not in skip_reason and log_callback:
+                        log_callback(skip_reason)
+                else:
+                    findings = findings_tuple if findings_tuple is not None else []
 
-                    for finding in findings:
+                for finding in findings:
 
-                        finding_callback(finding['type'], finding['pattern'], finding['url'], finding['match'], finding.get('verification', 'Format valid'))
+                    finding_callback(finding['type'], finding['pattern'], finding['url'], finding['match'], finding.get('verification', 'Format valid'))
 
-                        results['findings_count'] += 1
-                        self.findings_count += 1
+                    results['findings_count'] += 1
+                    self.findings_count += 1
 
-                        pattern_type = finding['type']
+                    pattern_type = finding['type']
 
-                        if pattern_type not in results['pattern_breakdown']:
+                    if pattern_type not in results['pattern_breakdown']:
 
-                            results['pattern_breakdown'][pattern_type] = 0
+                        results['pattern_breakdown'][pattern_type] = 0
 
-                        results['pattern_breakdown'][pattern_type] += 1
+                    results['pattern_breakdown'][pattern_type] += 1
 
             except Exception as e:
 

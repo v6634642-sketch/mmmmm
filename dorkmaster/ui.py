@@ -123,6 +123,9 @@ class DorkStrikeUI:
         self.verify_api_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options_frame, text="Проверять API ключи", variable=self.verify_api_var).grid(row=0, column=1, sticky=tk.W, padx=(20, 0))
 
+        self.raw_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="RAW Mode (показать все)", variable=self.raw_mode_var).grid(row=0, column=2, sticky=tk.W, padx=(20, 0))
+
         # Control buttons
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=2, column=0, columnspan=3, pady=(0, 10))
@@ -204,12 +207,12 @@ class DorkStrikeUI:
         stats_frame.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.stats_labels = {}
-        stats = ["Всего URL", "DNS OK", "Загружено", "Regex совп.", "Найдено", "Длительность"]
+        stats = ["Всего URL", "DNS OK", "Загружено", "Regex совп.", "Найдено", "Длительность", "Режим"]
         for i, stat in enumerate(stats):
             row = i // 3
             col = i % 3
             ttk.Label(stats_frame, text=f"{stat}:").grid(row=row, column=col*2, sticky=tk.W, padx=(0, 5))
-            label = ttk.Label(stats_frame, text="0")
+            label = ttk.Label(stats_frame, text="0" if stat != "Режим" else "STRICT")
             label.grid(row=row, column=col*2+1, sticky=tk.W, padx=(0, 20))
             self.stats_labels[stat] = label
 
@@ -259,7 +262,8 @@ class DorkStrikeUI:
                 use_js_rendering=self.js_rendering_var.get(),
                 verify_api_keys=self.verify_api_var.get(),
                 depth=self.depth_var.get(),
-                custom_dorks=custom_dorks
+                custom_dorks=custom_dorks,
+                raw_mode=self.raw_mode_var.get()
             )
 
             # Start scan in thread
@@ -314,6 +318,7 @@ class DorkStrikeUI:
         self.stats_labels["Загружено"].config(text=str(self.scanner.download_success_count))
         self.stats_labels["Regex совп."].config(text=str(self.scanner.regex_match_count))
         self.stats_labels["Найдено"].config(text=str(self.scanner.findings_count))
+        self.stats_labels["Режим"].config(text="RAW" if self.scanner.raw_mode else "STRICT")
         
         # Update resource classification stats
         resource_stats = self.scanner.resource_stats
@@ -345,6 +350,7 @@ class DorkStrikeUI:
         self.stats_labels["Regex совп."].config(text=str(results.get('regex_matches', 0)))
         self.stats_labels["Найдено"].config(text=str(results.get('findings_count', 0)))
         self.stats_labels["Длительность"].config(text=f"{results.get('duration', 0):.2f}s")
+        self.stats_labels["Режим"].config(text="RAW" if self.scanner and self.scanner.raw_mode else "STRICT")
 
         # Update resource classification stats
         resource_stats = results.get('resource_stats', {})
@@ -368,7 +374,10 @@ class DorkStrikeUI:
         self.log_text.delete(1.0, tk.END)
 
         # Initialize scanner
-        self.scanner = DorkScanner(verify_api_keys=self.verify_api_var.get())
+        self.scanner = DorkScanner(
+            verify_api_keys=self.verify_api_var.get(),
+            raw_mode=self.raw_mode_var.get()
+        )
 
         # Run local scan
         try:
@@ -396,7 +405,10 @@ class DorkStrikeUI:
         
         # Initialize scanner if not already done
         if not self.scanner:
-            self.scanner = DorkScanner()
+            self.scanner = DorkScanner(
+                verify_api_keys=self.verify_api_var.get(),
+                raw_mode=self.raw_mode_var.get()
+            )
 
         def run_debug():
             try:
@@ -421,22 +433,14 @@ class DorkStrikeUI:
                 self.root.after(0, lambda: self.debug_results_text.insert(tk.END, "Step 4: Applying regex patterns...\n"))
                 
                 category = self.category_var.get()
-                if category == "ALL":
-                    categories = ["CRYPTO", "SECRETS", "VULNERABILITIES"]
-                else:
-                    categories = [category]
-
-                all_findings = []
-                for cat in categories:
-                    patterns = self.scanner.patterns.get_patterns(cat)
-                    for pattern_name in patterns:
-                        findings, skip_reason = self.scanner.analyze_response(html_content, url, pattern_name, cat)
-                        if skip_reason:
-                            self.root.after(0, lambda s=skip_reason: self.debug_results_text.insert(tk.END, f"  - {pattern_name}: {s}\n"))
-                        if findings:
-                            all_findings.extend(findings)
-                            for f in findings:
-                                self.root.after(0, lambda f=f: self.debug_results_text.insert(tk.END, f"  [+] MATCH: {f['pattern']} | {f['match']} | {f['verification']}\n"))
+                all_findings, skip_reason = self.scanner.analyze_response(html_content, url, "ALL", category)
+                
+                if skip_reason and not all_findings:
+                    self.root.after(0, lambda s=skip_reason: self.debug_results_text.insert(tk.END, f"  - {s}\n"))
+                
+                if all_findings:
+                    for f in all_findings:
+                        self.root.after(0, lambda f=f: self.debug_results_text.insert(tk.END, f"  [+] MATCH: {f['pattern']} | {f['match']} | {f['verification']}\n"))
 
                 self.root.after(0, lambda: self.debug_results_text.insert(tk.END, f"\nStep 5: Done. Total findings: {len(all_findings)}\n"))
 

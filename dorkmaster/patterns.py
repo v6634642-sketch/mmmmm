@@ -145,44 +145,72 @@ def is_valid_zec_address(address: str) -> bool:
     except:
         return False
 
-def validate_crypto_pattern(pattern_name: str, match: str) -> bool:
-    """Validate crypto wallet/address patterns with checksums."""
+def validate_crypto_pattern(pattern_name: str, match: str, raw_mode: bool = False) -> Tuple[bool, str]:
+    """
+    Validate crypto wallet/address patterns with checksums.
+    В RAW MODE: возвращает True для ВСЕХ совпадений
+    """
+    if raw_mode:
+        return True, "RAW_MATCH"
+
+    is_valid = True
     if pattern_name == "BTC" and (match.startswith(('1', '3')) or match.startswith('bc1')):
-        return is_valid_btc_address(match)
+        is_valid = is_valid_btc_address(match)
     elif pattern_name == "ETH" and match.startswith('0x'):
-        return is_valid_eth_address(match)
+        is_valid = is_valid_eth_address(match)
     elif pattern_name == "XRP" and match.startswith('r'):
-        return is_valid_xrp_address(match)
+        is_valid = is_valid_xrp_address(match)
     elif pattern_name == "LTC" and match.startswith(('L', 'M')):
-        return is_valid_ltc_address(match)
+        is_valid = is_valid_ltc_address(match)
     elif pattern_name == "DOGE" and match.startswith('D'):
-        return is_valid_doge_address(match)
+        is_valid = is_valid_doge_address(match)
     elif pattern_name == "BCH" and match.startswith(('1', '3')):
-        return is_valid_bch_address(match)
+        is_valid = is_valid_bch_address(match)
     elif pattern_name == "DASH" and match.startswith('X'):
-        return is_valid_dash_address(match)
+        is_valid = is_valid_dash_address(match)
     elif pattern_name == "ZEC" and match.startswith(('t1', 't3')):
-        return is_valid_zec_address(match)
+        is_valid = is_valid_zec_address(match)
     # For other patterns, use entropy check as fallback
     elif len(match) > 10:
         entropy = calculate_shannon_entropy(match)
-        return entropy > 4.0  # High entropy threshold for secrets
-    return True  # Default to valid for patterns without specific validation
+        if entropy > 4.0:
+            return True, "Format valid"
+        return False, "Low entropy"
+    
+    if is_valid:
+        return True, "Format valid"
+    return False, "Invalid checksum"
 
-def validate_secret_pattern(pattern_name: str, match: str) -> bool:
-    """Validate secret patterns using entropy."""
+def validate_secret_pattern(pattern_name: str, match: str, raw_mode: bool = False) -> Tuple[bool, str]:
+    """
+    Validate secret patterns using entropy.
+    В RAW MODE: возвращает True для ВСЕХ совпадений
+    В STRICT MODE: применяет валидацию
+    """
+    if raw_mode:
+        return True, "RAW_MATCH"
+
     if len(match) < 8:
-        return False
+        return False, "Too short"
 
     entropy = calculate_shannon_entropy(match)
     # Different entropy thresholds for different secret types
     if pattern_name in ["API Key", "JWT", "AWS", "GCP", "Azure", "Bearer Token"]:
-        return entropy > 4.5  # High entropy for API keys
+        if entropy > 4.5:
+            return True, "Format valid"
+        return False, "Low entropy"
     elif pattern_name in ["Password", "Generic Password"]:
-        return entropy > 3.5  # Medium entropy for passwords
+        if entropy > 3.5:
+            return True, "Format valid"
+        return False, "Low entropy"
     elif pattern_name in ["Private Key", "SSH Key", "PGP Private Key"]:
-        return entropy > 5.0  # Very high entropy for private keys
-    return entropy > 3.0  # Default entropy check
+        if entropy > 5.0:
+            return True, "Format valid"
+        return False, "Low entropy"
+    
+    if entropy > 3.0:
+        return True, "Format valid"
+    return False, "Low entropy"
 
 async def verify_aws_key(access_key: str, secret_key: Optional[str] = None) -> Tuple[bool, str]:
     """Verify AWS access key by making a safe API call."""
