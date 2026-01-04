@@ -401,6 +401,106 @@ class DorkPatterns:
 
     def __init__(self):
         self.patterns = PATTERNS
+        self.initialize_pattern_categories()
+
+    def initialize_pattern_categories(self):
+        """Add allow_categories and deny_categories to patterns based on their type"""
+        # Define category mappings for different pattern types
+        category_mapping = {
+            # Category A: CONFIG/DATA FILES - Most secrets belong here
+            'A': {
+                'names': [
+                    'AWS', 'GCP', 'Azure', 'JWT', 'Bearer Token', 
+                    'Private RSA Key', 'PGP Private Key', 'SSH Key',
+                    'Config File', 'Log File', 'Exposed DB', 'Session Files', 
+                    'Cache Files', 'Temp Files', '.htaccess', '.htpasswd', 'Web.config'
+                ]
+            },
+            # Category B: SOURCE/BUILD ARTIFACTS  
+            'B': {
+                'names': [
+                    'API Key', 'Database Connection', 'Private RSA Key',
+                    'Generic Password', 'GitHub Token', 'Stripe Key', 'Slack Token'
+                ]
+            },
+            # Category C: BACKUPS/DUMPS
+            'C': {
+                'names': [
+                    'Backup File', 'Dump'
+                ]
+            },
+            # Category D: WEB PAGES (usually vulnerabilities)
+            'D': {
+                'names': [
+                    'SQL Error', 'XSS', 'Git Folder', 'SVN Folder', 'DS_Store',
+                    'PHP Info', 'Directory Listing', 'Admin Panel', 
+                    'WordPress', 'Joomla', 'Drupal', 'Path Traversal', 
+                    'LFI/RFI', 'Command Injection', 'Open Redirect', 
+                    'CORS Misconfig', 'Exposed API', 'Debug Info', 
+                    'Server Info', 'Robots.txt', 'Sitemap.xml', 
+                    'Error Logs', 'Version Disclosure', 'Default Creds'
+                ]
+            }
+        }
+        
+        # Universal patterns (applied to A/B/C, denied D/E)
+        universal_patterns = {
+            'names': [
+                'ETH', 'BTC', 'LTC', 'DOGE', 'XRP', 'ADA', 'SOL', 'DOT', 'BNB',
+                'MATIC', 'AVAX', 'TRX', 'XMR', 'ZEC', 'BCH', 'DASH',
+                'Generic Base64', 'Cloudinary', 'Firebase', 'MailChimp API',
+                'Twilio API', 'PayPal Token', 'Heroku Token', 'Jira Token',
+                'BitBucket Token', 'CircleCI Token', 'TravisCI Token',
+                'OpsGenie API', 'PagerDuty Token', 'DataDog API',
+                'Shopify Access Token', 'DigitalOcean Token', 'Linode Token',
+                'Algolia API Key', 'Sentry DSN'
+            ],
+            'allow': ['A', 'B', 'C'],
+            'deny': ['D', 'E']
+        }
+        
+        # Build name-to-category mapping
+        name_to_categories = {}
+        
+        for category_key, category_data in category_mapping.items():
+            for pattern_name in category_data['names']:
+                name_to_categories[pattern_name] = [category_key]
+        
+        # Universal patterns can operate in multiple categories
+        for pattern_name in universal_patterns['names']:
+            name_to_categories[pattern_name] = universal_patterns['allow']
+            
+        # Update patterns with category information
+        for category_name, category_patterns in self.patterns.items():
+            for pattern_name, pattern_data in category_patterns.items():
+                
+                # Determine allowed categories for this pattern
+                if pattern_name in name_to_categories:
+                    allow_categories = name_to_categories[pattern_name]
+                    # Deny categories not explicitly allowed
+                    deny_categories = [cat for cat in ['D', 'E'] if cat not in allow_categories]
+                else:
+                    # Default: allow A/B/C, deny D/E (opt-in for web/doc patterns)
+                    allow_categories = ['A', 'B', 'C']
+                    deny_categories = ['D', 'E']
+                
+                # Update the pattern data structure
+                if isinstance(pattern_data, str):
+                    # Convert simple string to dict with enhanced metadata
+                    self.patterns[category_name][pattern_name] = {
+                        'regex': [pattern_data],
+                        'dorks': self._get_dorks_for_pattern(pattern_name, category_name),
+                        'allow_categories': allow_categories,
+                        'deny_categories': deny_categories
+                    }
+                elif isinstance(pattern_data, dict):
+                    # Ensure existing dict has the category fields
+                    pattern_data['allow_categories'] = allow_categories
+                    pattern_data['deny_categories'] = deny_categories
+                    if 'regex' not in pattern_data:
+                        pattern_data['regex'] = []
+                    if 'dorks' not in pattern_data:
+                        pattern_data['dorks'] = self._get_dorks_for_pattern(pattern_name, category_name)
 
     def get_patterns(self, category):
         """Get patterns for a specific category"""
@@ -413,7 +513,9 @@ class DorkPatterns:
                 # Convert simple regex string to dict format
                 patterns_dict[pattern_name] = {
                     'regex': [pattern_data],
-                    'dorks': self._get_dorks_for_pattern(pattern_name, category)
+                    'dorks': self._get_dorks_for_pattern(pattern_name, category),
+                    'allow_categories': ['A', 'B', 'C'],  # Default
+                    'deny_categories': ['D', 'E']  # Default
                 }
             else:
                 patterns_dict[pattern_name] = pattern_data
