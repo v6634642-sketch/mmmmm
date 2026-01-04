@@ -60,7 +60,7 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 class DorkScanner:
-    def __init__(self, proxies=None, search_engines=None, use_js_rendering=False, verify_api_keys=False, strictness="medium", depth=3, custom_dorks=None, raw_mode=False):
+    def __init__(self, proxies=None, search_engines=None, use_js_rendering=False, verify_api_keys=False, strictness="medium", depth=3, custom_dorks=None, raw_mode=False, delay=5.0, dns_verify=True, proxy_type="SOCKS5", ua_rotate=True):
         self.patterns = DorkPatterns()
         self.stop_event = threading.Event()
         self.session = requests.Session()
@@ -75,6 +75,10 @@ class DorkScanner:
         self.request_count = 0
         self.custom_dorks = custom_dorks or []
         self.raw_mode = raw_mode
+        self.delay = delay
+        self.dns_verify = dns_verify
+        self.proxy_type = proxy_type
+        self.ua_rotate = ua_rotate
         
         # Resource classification tracking
         self.resource_stats = {category: 0 for category in RESOURCE_CATEGORIES.keys()}
@@ -829,3 +833,15 @@ class DorkScanner:
                 continue
 
         return found_urls
+
+    def test_proxy(self, proxy):
+        """Test if a proxy is working"""
+        try:
+            proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+            response = requests.get('http://httpbin.org/ip', proxies=proxies, timeout=5)
+            return response.status_code == 200
+        except:
+            return False
