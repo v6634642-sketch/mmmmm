@@ -153,21 +153,34 @@ class DorkScanner:
         start_time = time.time()
         self.target_domain = target_domain
 
-        log_callback(f"Stage 1: Searching Wayback Machine for {target_domain}...")
-        
-        # SEARCH STAGE
+        log_callback("="*60)
+        log_callback(f"SCAN STARTED: {target_domain}")
+        log_callback(f"Pattern Category: {pattern_category}")
+        log_callback(f"Raw Mode: {'ENABLED' if self.raw_mode else 'DISABLED'}")
+        log_callback(f"Verify API Keys: {'ENABLED' if self.verify_api_keys else 'DISABLED'}")
+        log_callback("="*60)
+
+        log_callback(f"\n[STAGE 1] SEARCH: Querying Wayback Machine for {target_domain}...")
+
+        # SEARCH STAGE - Use Wayback CDX API
         found_urls = await self.search_wayback_archives(target_domain, log_callback)
-        
+
         # Also include any custom dorks if they look like direct URLs
+        custom_urls = []
         for dork in self.custom_dorks:
             if dork.startswith("http"):
-                 found_urls.append(dork.replace("{target}", target_domain))
-        
+                 url = dork.replace("{target}", target_domain)
+                 custom_urls.append(url)
+
+        if custom_urls:
+            log_callback(f"[STAGE 1] Adding {len(custom_urls)} custom URLs")
+            found_urls.extend(custom_urls)
+
         found_urls = list(set(found_urls))
         self.total_urls = len(found_urls)
         total_urls = self.total_urls
 
-        log_callback(f"Stage 1: Found {total_urls} URLs in archives")
+        log_callback(f"[STAGE 1] COMPLETE: Found {total_urls} URLs total")
 
         results = {
             'total_urls': total_urls,
@@ -182,6 +195,10 @@ class DorkScanner:
 
         findings = []
         response_times = []
+
+        # STAGE 2 & 3: FETCH AND MATCH
+        log_callback(f"\n[STAGE 2-3] FETCH & MATCH: Downloading content and analyzing patterns...")
+        log_callback(f"Concurrent threads: {max_concurrent}")
 
         # Create semaphore to limit concurrent requests
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -265,19 +282,29 @@ class DorkScanner:
         results['download_success'] = self.download_success_count
         results['regex_matches'] = self.regex_match_count
         results['resource_stats'] = self.resource_stats
-        
+
         # Log summary stages
-        log_callback(f"Stage 2: Domain validation passed: {self.dns_passed_count}")
-        log_callback(f"Stage 3: Downloads successful: {self.download_success_count}")
-        
+        log_callback(f"\n[STAGE 2] DNS VALIDATION: {self.dns_passed_count} domains resolved")
+        log_callback(f"[STAGE 3] CONTENT FETCH: {self.download_success_count} downloads successful ({total_urls - self.download_success_count} failed)")
+
         # Log resource classification summary (Stage 4)
         resource_summary = " | ".join([f"{cat}:{RESOURCE_CATEGORIES[cat][:8]}:{count}" for cat, count in self.resource_stats.items()])
-        log_callback(f"Stage 4: Classification categories: {resource_summary}")
-        
-        log_callback(f"Stage 5: Regex matched: {self.regex_match_count}")
-        log_callback(f"Stage 6: Final findings: {results['findings_count']}")
-        
-        log_callback(f"Scan completed. Found {results['findings_count']} potential vulnerabilities.")
+        log_callback(f"[STAGE 4] CLASSIFICATION: {resource_summary}")
+
+        log_callback(f"[STAGE 5] PATTERN MATCH: {self.regex_match_count} regex matches found")
+        log_callback(f"[STAGE 6] FINAL RESULTS: {results['findings_count']} findings reported")
+
+        # Pattern breakdown
+        if results['pattern_breakdown']:
+            log_callback(f"\nPattern breakdown:")
+            for pattern_type, count in results['pattern_breakdown'].items():
+                log_callback(f"  - {pattern_type}: {count}")
+
+        log_callback(f"\n{'='*60}")
+        log_callback(f"SCAN COMPLETE: Duration {results['duration']:.2f}s")
+        log_callback(f"Found {results['findings_count']} potential security findings")
+        log_callback(f"{'='*60}")
+
         return results
 
     def scan(self, target_domain, pattern_category, max_concurrent, progress_callback, log_callback, finding_callback):
@@ -298,49 +325,32 @@ class DorkScanner:
             loop.close()
 
     def generate_dork_urls(self, target_domain, pattern_category):
-        """Generate dork URLs for multiple search engines"""
-        base_urls = [
-            f"site:{target_domain}",
-            f"site:{target_domain} inurl:",
-            f"site:{target_domain} filetype:",
-            f"site:{target_domain} intitle:",
-        ]
-
+        """
+        Generate dork URLs for scanning.
+        NOTE: This method is deprecated for remote scanning.
+        Use search_wayback_archives() instead for the new pipeline.
+        Only custom URLs are now supported.
+        """
         dork_urls = []
 
-        if pattern_category == "ALL":
-            categories = ["CRYPTO", "SECRETS", "VULNERABILITIES"]
-        else:
-            categories = [pattern_category]
-
-        # Add custom dorks first
+        # Only process custom dorks that are direct URLs
         if self.custom_dorks:
-            for engine in self.search_engines:
-                for custom_dork in self.custom_dorks:
-                    # Replace {target} placeholder with actual domain
-                    dork = custom_dork.replace("{target}", target_domain)
-                    search_url = self._generate_search_url(engine, dork)
-                    if search_url:
-                        dork_urls.append((search_url, "Custom Dork", "CUSTOM"))
-
-        # Add pattern-based dorks
-        for engine in self.search_engines:
-            for category in categories:
-                patterns = self.patterns.get_patterns(category)
-                for pattern_name, pattern_data in patterns.items():
-                    dorks = pattern_data.get('dorks', [])
-                    for dork in dorks:
-                        for base_url in base_urls:
-                            full_dork = f"{base_url} {dork}"
-                            # Generate URL for each search engine
-                            search_url = self._generate_search_url(engine, full_dork)
-                            if search_url:
-                                dork_urls.append((search_url, pattern_name, category))
+            for custom_dork in self.custom_dorks:
+                # Replace {target} placeholder with actual domain
+                url = custom_dork.replace("{target}", target_domain)
+                if url.startswith("http://") or url.startswith("https://"):
+                    dork_urls.append((url, "Custom URL", "CUSTOM"))
 
         return dork_urls
 
     def _generate_search_url(self, engine, query):
-        """Generate search URL for different engines"""
+        """
+        Generate search URL for different engines.
+
+        DEPRECATED: This method is no longer used for the main scanning pipeline.
+        The scanner now uses Wayback Machine CDX API via search_wayback_archives().
+        This method is kept for backward compatibility only.
+        """
         query_encoded = query.replace(' ', '+')
 
         if engine == 'google':
@@ -363,30 +373,66 @@ class DorkScanner:
         Ищем файлы по расширению для конкретного домена.
         """
         found_urls = []
-        extensions = ["env", "json", "txt", "sql", "bak", "yml", "yaml", "conf"]
-        
+        # Extended list of sensitive file extensions
+        extensions = [
+            "env", "json", "txt", "sql", "bak", "yml", "yaml", "conf",
+            "key", "pem", "crt", "p12", "pfx", "jks", "keystore",
+            "db", "sqlite", "sqlite3", "dump", "backup",
+            "zip", "tar", "tar.gz", "rar", "7z",
+            "log", "old", "save", "tmp", "orig", "swp",
+            "ini", "cfg", "config", "properties"
+        ]
+
+        if log_callback:
+            log_callback(f"Wayback: Scanning {len(extensions)} file extensions for {target}...")
+
         async with aiohttp.ClientSession() as session:
             for ext in extensions:
-                if self.stop_event.is_set(): 
+                if self.stop_event.is_set():
                     break
-                
+
                 # CDX API запрос: ищем файлы с расширением на целевом домене
-                url = f"http://web.archive.org/cdx/search/cdx?url={target}/*&filter=original:.*\\.{ext}&output=json&collapse=urlkey&filter=statuscode:200"
-                
+                # Using multiple filters to get relevant results
+                url = (
+                    f"http://web.archive.org/cdx/search/cdx?url={target}/*"
+                    f"&filter=original:.*\\.{ext}"
+                    f"&filter=statuscode:200"
+                    f"&output=json"
+                    f"&collapse=urlkey"
+                    f"&limit=100"
+                )
+
                 try:
-                    async with session.get(url, timeout=10) as response:
+                    async with session.get(url, timeout=15) as response:
                         if response.status == 200:
                             data = await response.json()
-                            # Пропускаем заголовок [["urlkey", "timestamp", ...]]
+                            # Пропускаем заголовок [["urlkey", "timestamp", "original", "mimetype", "statuscode", ...]]
                             if len(data) > 1:
+                                ext_count = 0
                                 for item in data[1:]:
-                                    found_urls.append(item[2])  # Индекс 2 - оригинальный URL
-                                    
+                                    if len(item) >= 3:
+                                        original_url = item[2]
+                                        found_urls.append(original_url)
+                                        ext_count += 1
+                                if log_callback and ext_count > 0:
+                                    log_callback(f"Wayback: Found {ext_count} .{ext} files")
+                        elif response.status == 429:
+                            if log_callback:
+                                log_callback(f"Wayback: Rate limited, waiting...")
+                            await asyncio.sleep(2)
+
+                except asyncio.TimeoutError:
+                    if log_callback:
+                        log_callback(f"Wayback: Timeout for .{ext} files")
                 except Exception as e:
                     if log_callback:
                         log_callback(f"Wayback error ({ext}): {e}")
-        
-        return list(set(found_urls))
+
+        # Deduplicate URLs
+        found_urls = list(set(found_urls))
+        if log_callback:
+            log_callback(f"Wayback: Total unique URLs found: {len(found_urls)}")
+        return found_urls
 
     async def check_dns_resolution(self, domain):
         """Check if domain resolves to IP addresses"""
@@ -457,9 +503,9 @@ class DorkScanner:
                 # Check DNS resolution first
                 if not await self.check_dns_resolution(domain):
                     if log_callback:
-                        log_callback(f"URL rejected: DNS resolution failed ({domain})")
+                        log_callback(f"  [DNS FAIL] {url}")
                     return [], time.time() - start_time
-                
+
                 self.dns_passed_count += 1
 
                 # Use JS rendering if enabled
@@ -561,7 +607,7 @@ class DorkScanner:
         """Analyze the HTML content for patterns with validation and resource classification."""
         findings = []
         skip_reason = None
-        
+
         # Check domain if target_domain is set
         if self.target_domain and "://" in url:
             parsed_url = urlparse(url)
@@ -572,15 +618,15 @@ class DorkScanner:
         # Classify the resource
         resource = self.classify_resource(url)
         resource_category = resource['category']
-        
+
         # Update resource statistics
         self.resource_stats[resource_category] += 1
-        
+
         # Skip if URL is blacklisted (Category E)
         if resource_category == 'E':
             skip_reason = f"URL rejected: blacklist ({url})"
             return findings, skip_reason
-        
+
         if category == "ALL":
             categories_to_check = ["CRYPTO", "SECRETS", "VULNERABILITIES"]
         else:
@@ -588,33 +634,39 @@ class DorkScanner:
 
         for cat in categories_to_check:
             patterns = self.patterns.get_patterns(cat)
-            
+
             patterns_to_check = {}
             if pattern_name == "ALL" or pattern_name == "Custom Dork" or pattern_name == "CUSTOM":
                 patterns_to_check = patterns
             elif pattern_name in patterns:
                 patterns_to_check = {pattern_name: patterns[pattern_name]}
-            
+
             for p_name, pattern_data in patterns_to_check.items():
                 regex_patterns = pattern_data.get('regex', [])
                 allow_categories = pattern_data.get('allow_categories', ['A', 'B', 'C'])  # Default to A/B/C
                 deny_categories = pattern_data.get('deny_categories', ['D', 'E'])
-                
+
                 # Check if pattern is allowed for this resource category
                 # In RAW MODE we bypass category filtering
                 if not self.raw_mode:
                     if resource_category not in allow_categories:
                         continue
-                        
+
                     if resource_category in deny_categories:
                         continue
-                    
+
                 for regex in regex_patterns:
                     try:
                         matches = re.findall(regex, html_content, re.IGNORECASE | re.MULTILINE)
                         for match in matches:
                             self.regex_match_count += 1
-                            match_str = str(match)[:100]  # Limit match length
+
+                            # Handle tuple matches from regex groups
+                            if isinstance(match, tuple):
+                                # Use the last captured group (usually the actual value)
+                                match_str = str(match[-1])[:100] if match[-1] else str(match[0])[:100]
+                            else:
+                                match_str = str(match)[:100]  # Limit match length
 
                             # Apply validation based on category
                             is_valid = True
@@ -624,7 +676,7 @@ class DorkScanner:
                                 is_valid, verification_status = validate_crypto_pattern(p_name, match_str, self.raw_mode)
                             elif cat == "SECRETS":
                                 is_valid, verification_status = validate_secret_pattern(p_name, match_str, self.raw_mode)
-                                
+
                                 # Additional API verification for supported services
                                 if is_valid and self.verify_api_keys and cat == "SECRETS" and not self.raw_mode:
                                     # Run async verification in current thread
@@ -644,7 +696,9 @@ class DorkScanner:
                                     except Exception as e:
                                         verification_status = f"Verification error: {str(e)}"
 
-                            if is_valid or self.raw_mode:
+                            # In RAW MODE, show ALL matches
+                            # In STRICT MODE, only show valid matches
+                            if self.raw_mode or is_valid:
                                 findings.append({
                                     'type': cat,
                                     'pattern': p_name,
@@ -654,9 +708,9 @@ class DorkScanner:
                                     'resource_category': resource_category,
                                     'resource_priority': resource['priority']
                                 })
-                    except re.error:
+                    except re.error as e:
                         continue  # Skip invalid regex patterns
-        
+
         if not findings:
             skip_reason = f"No findings for {url}"
 
