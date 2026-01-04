@@ -148,9 +148,20 @@ def is_valid_zec_address(address: str) -> bool:
 def validate_crypto_pattern(pattern_name: str, match: str, raw_mode: bool = False) -> Tuple[bool, str]:
     """
     Validate crypto wallet/address patterns with checksums.
-    В RAW MODE: возвращает True для ВСЕХ совпадений
+
+    In RAW MODE: Returns True for ALL matches without validation
+    In STRICT MODE: Applies checksum validation and entropy checks
+
+    Args:
+        pattern_name: Name of the crypto pattern (BTC, ETH, etc.)
+        match: The matched string to validate
+        raw_mode: If True, skip validation and accept all matches
+
+    Returns:
+        Tuple of (is_valid, status_message)
     """
     if raw_mode:
+        # RAW MODE: Accept all matches without validation
         return True, "RAW_MATCH"
 
     is_valid = True
@@ -176,18 +187,28 @@ def validate_crypto_pattern(pattern_name: str, match: str, raw_mode: bool = Fals
         if entropy > 4.0:
             return True, "Format valid"
         return False, "Low entropy"
-    
+
     if is_valid:
         return True, "Format valid"
     return False, "Invalid checksum"
 
 def validate_secret_pattern(pattern_name: str, match: str, raw_mode: bool = False) -> Tuple[bool, str]:
     """
-    Validate secret patterns using entropy.
-    В RAW MODE: возвращает True для ВСЕХ совпадений
-    В STRICT MODE: применяет валидацию
+    Validate secret patterns using entropy analysis.
+
+    In RAW MODE: Returns True for ALL matches without validation
+    In STRICT MODE: Applies entropy-based validation
+
+    Args:
+        pattern_name: Name of the secret pattern (API Key, JWT, etc.)
+        match: The matched string to validate
+        raw_mode: If True, skip validation and accept all matches
+
+    Returns:
+        Tuple of (is_valid, status_message)
     """
     if raw_mode:
+        # RAW MODE: Accept all matches without validation
         return True, "RAW_MATCH"
 
     if len(match) < 8:
@@ -207,7 +228,7 @@ def validate_secret_pattern(pattern_name: str, match: str, raw_mode: bool = Fals
         if entropy > 5.0:
             return True, "Format valid"
         return False, "Low entropy"
-    
+
     if entropy > 3.0:
         return True, "Format valid"
     return False, "Low entropy"

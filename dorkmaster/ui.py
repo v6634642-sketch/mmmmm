@@ -207,7 +207,7 @@ class DorkStrikeUI:
         stats_frame.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.stats_labels = {}
-        stats = ["Всего URL", "DNS OK", "Загружено", "Regex совп.", "Найдено", "Длительность", "Режим"]
+        stats = ["Wayback URL", "DNS OK", "Загружено", "Regex совп.", "Найдено", "Длительность", "Режим"]
         for i, stat in enumerate(stats):
             row = i // 3
             col = i % 3
@@ -312,14 +312,14 @@ class DorkStrikeUI:
     def update_live_stats(self):
         if not self.scanner:
             return
-            
-        self.stats_labels["Всего URL"].config(text=str(self.scanner.total_urls))
+
+        self.stats_labels["Wayback URL"].config(text=str(self.scanner.total_urls))
         self.stats_labels["DNS OK"].config(text=str(self.scanner.dns_passed_count))
         self.stats_labels["Загружено"].config(text=str(self.scanner.download_success_count))
         self.stats_labels["Regex совп."].config(text=str(self.scanner.regex_match_count))
         self.stats_labels["Найдено"].config(text=str(self.scanner.findings_count))
         self.stats_labels["Режим"].config(text="RAW" if self.scanner.raw_mode else "STRICT")
-        
+
         # Update resource classification stats
         resource_stats = self.scanner.resource_stats
         stats_text = " | ".join([f"{cat}:{count}" for cat, count in resource_stats.items()])
@@ -344,7 +344,7 @@ class DorkStrikeUI:
             self.findings_tree.insert("", tk.END, values=(finding_type, pattern, url, match, verification))
 
     def update_statistics(self, results):
-        self.stats_labels["Всего URL"].config(text=str(results.get('total_urls', 0)))
+        self.stats_labels["Wayback URL"].config(text=str(results.get('total_urls', 0)))
         self.stats_labels["DNS OK"].config(text=str(results.get('dns_passed', 0)))
         self.stats_labels["Загружено"].config(text=str(results.get('download_success', 0)))
         self.stats_labels["Regex совп."].config(text=str(results.get('regex_matches', 0)))
